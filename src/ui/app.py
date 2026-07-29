@@ -1,10 +1,13 @@
 import sys
 import asyncio
 import concurrent.futures
+import re
 from pathlib import Path
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+import streamlit as st  # must be before any @st.dialog usage
 
 
 def run_async(coro):
@@ -13,18 +16,121 @@ def run_async(coro):
         future = pool.submit(asyncio.run, coro)
         return future.result()
 
-
-import re
-
 def safe_md(text: str) -> str:
-    """Escape currency $ signs so Streamlit doesn't treat them as LaTeX delimiters.
-    Matches $ followed by digits or a space then digits (e.g. $2,500,000 or $ 35,543).
-    Leaves any genuine $$...$$  LaTeX blocks untouched.
-    """
-    # Escape $ when immediately followed by a digit or comma-digit sequence
+    """Escape currency $ signs so Streamlit doesn't treat them as LaTeX delimiters."""
     return re.sub(r'\$(?=[\d,])', r'\\$', text)
 
-import streamlit as st
+
+def find_pdf(claim_id: str, path: str):
+    """Locate a PDF file for a citation. `path` is the filename stored in metadata."""
+    filename = Path(path).name
+    pdf_path = DATA_DIR / claim_id / filename
+    if pdf_path.exists():
+        return pdf_path
+    # Fallback: search the claim folder for a matching file_type
+    claim_dir = DATA_DIR / claim_id
+    if claim_dir.exists():
+        pdfs = list(claim_dir.glob("*.pdf"))
+        if pdfs:
+            return pdfs[0]
+    return None
+
+
+@st.dialog("📄 Document Viewer", width="large")
+def open_pdf_modal(claim_id: str, file_type: str, path: str):
+    """Full-screen PDF viewer — all pages stacked, user scrolls. No reruns."""
+    import pypdfium2 as pdfium
+
+    # ── CSS: stretch dialog to near-fullscreen, allow scrolling ──────────────
+    st.markdown("""
+    <style>
+    div[data-baseweb="modal"] > div {
+        max-width: 94vw !important;
+        width: 94vw !important;
+        max-height: 94vh !important;
+        height: 94vh !important;
+        border-radius: 10px !important;
+    }
+    div[data-baseweb="modal"] > div > div {
+        max-height: 92vh !important;
+        overflow-y: auto !important;
+        padding: 16px 20px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    pdf_path = find_pdf(claim_id, path)
+    if not pdf_path:
+        st.warning("PDF file not found locally.")
+        return
+
+    try:
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        n_pages = len(pdf)
+
+        # ── Header row: title + download ─────────────────────────────────────
+        col_t, col_dl = st.columns([4, 1])
+        with col_t:
+            st.markdown(
+                f"**{claim_id} — {file_type}** &nbsp; "
+                f'<span style="color:#888;font-size:0.85rem">'
+                f"{pdf_path.name} · {n_pages} page{'s' if n_pages > 1 else ''}"
+                f"</span>",
+                unsafe_allow_html=True,
+            )
+        with col_dl:
+            with open(pdf_path, "rb") as f:
+                st.download_button(
+                    "⬇ Download", data=f, file_name=pdf_path.name,
+                    mime="application/pdf", key=f"dl_{claim_id}_{file_type}",
+                    use_container_width=True,
+                )
+        st.divider()
+
+        # ── Render ALL pages as base64 → single HTML block (forces 100% width) ─
+        import io, base64 as b64
+        pages_html = []
+        for i in range(n_pages):
+            buf = io.BytesIO()
+            pdf[i].render(scale=2.8).to_pil().save(buf, format="PNG")
+            img_b64 = b64.b64encode(buf.getvalue()).decode()
+            label = f'<div style="text-align:center;color:#999;font-size:0.78rem;margin:4px 0 8px">Page {i+1} of {n_pages}</div>' if n_pages > 1 else ""
+            separator = '<div style="height:1px;background:#e8e8e8;margin:10px 0"></div>' if i < n_pages - 1 else ""
+            pages_html.append(
+                f'<img src="data:image/png;base64,{img_b64}" '
+                f'style="width:100%;display:block;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,0.1)"/>'
+                f'{label}{separator}'
+            )
+        pdf.close()
+
+        st.markdown(
+            f'<div style="width:100%">{"".join(pages_html)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    except Exception as e:
+        st.error(f"Could not render PDF: {e}")
+
+
+def render_citations(citations: list, key_prefix: str):
+    """Render simple inline reference tags below a chat/summary response."""
+    if not citations:
+        return
+    seen, unique = set(), []
+    for c in citations:
+        k = (c["claim_id"], c["file_type"])
+        if k not in seen:
+            seen.add(k)
+            unique.append(c)
+    refs = " &nbsp;·&nbsp; ".join(
+        f'<span style="background:#e8f4f8;border:1px solid #b3d4f0;border-radius:4px;'
+        f'padding:2px 8px;font-size:0.8rem;color:#1565c0">'
+        f'📄 {c["claim_id"]} — {c["file_type"]}</span>'
+        for c in unique
+    )
+    st.markdown(f'<div style="margin-top:6px">**Ref:** {refs}</div>',
+                unsafe_allow_html=True)
+
 from src.config import CLAIMS_JSON, DATA_DIR, ANTHROPIC_API_KEY
 from src.tools.document_store import DocumentStore
 from src.agents.ingestion import IngestionAgent
@@ -61,6 +167,8 @@ def init_state():
         "summaries_cache": {},
         "messages": [],
         "store": None,
+        "citations_by_msg": {},
+        "view_doc": None,          # {"claim_id", "file_type", "path"} — set by sidebar buttons
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -113,13 +221,16 @@ with st.sidebar:
         )
         st.session_state.selected_claim = selected
 
-        # Show doc types for selected claim
+        # Show doc types as clickable view buttons
         docs = store.get_by_claim(selected)
         if docs:
-            doc_types = [d["metadata"]["file_type"] for d in docs]
-            st.caption(f"**{len(doc_types)} documents:**")
-            for dt in doc_types:
-                st.caption(f"  • {dt}")
+            st.caption(f"**{len(docs)} documents** — click to view:")
+            for d in docs:
+                ft = d["metadata"]["file_type"]
+                path = d["metadata"].get("path", "")
+                if st.button(f"📄 {ft}", key=f"doc_btn_{selected}_{ft}",
+                             use_container_width=True):
+                    open_pdf_modal(selected, ft, path)
     else:
         st.info("No claims loaded yet.")
 
@@ -203,6 +314,21 @@ with tab_summary:
             # Main summary
             st.markdown(safe_md(result["summary"]))
 
+            # ── Sources analysed ─────────────────────────────────────────────
+            docs_used = store.get_by_claim(claim_id)
+            if docs_used:
+                refs_html = " &nbsp;·&nbsp; ".join(
+                    f'<span style="background:#e8f4f8;border:1px solid #b3d4f0;'
+                    f'border-radius:4px;padding:2px 8px;font-size:0.8rem;color:#1565c0">'
+                    f'📄 {claim_id} — {d["metadata"]["file_type"]}</span>'
+                    for d in docs_used
+                )
+                st.markdown(
+                    f'<div style="margin:8px 0 4px 0"><strong>Sources analysed:</strong> '
+                    f'{refs_html}</div>',
+                    unsafe_allow_html=True,
+                )
+
             # Agent outputs in expanders
             st.divider()
             col_f, col_c = st.columns(2)
@@ -278,7 +404,7 @@ with tab_chat:
         st.caption("No claim selected — you can still ask general questions across all claims.")
 
     # Display chat history
-    for msg in st.session_state.messages:
+    for msg_idx, msg in enumerate(st.session_state.messages):
         role = msg["role"]
         content = msg["content"]
         # content may be a list (for tool_use assistant turns) — extract text
@@ -293,13 +419,15 @@ with tab_chat:
             text = str(content)
 
         if role == "user" and not isinstance(content, list):
-            # Strip context injection prefix for display
             display_text = text.split("\n\n", 1)[-1] if text.startswith("[Context:") else text
             with st.chat_message("user"):
                 st.markdown(display_text)
         elif role == "assistant" and text:
             with st.chat_message("assistant"):
                 st.markdown(safe_md(text))
+                # Render citations if this message has any
+                saved = st.session_state.citations_by_msg.get(msg_idx, [])
+                render_citations(saved, key_prefix=f"hist_{msg_idx}")
 
     # Chat input
     user_input = st.chat_input("Ask about claims, coverage, or any document...")
@@ -323,11 +451,12 @@ with tab_chat:
                     history.append({"role": role, "content": text})
 
         # Stream response
+        current_citations: list = []
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
             full_response = ""
             try:
-                for chunk in chat_agent.stream_response(user_input, history, claim_id):
+                for chunk in chat_agent.stream_response(user_input, history, claim_id, current_citations):
                     full_response += chunk
                     response_placeholder.markdown(safe_md(full_response) + "▌")
                 response_placeholder.markdown(safe_md(full_response))
@@ -335,9 +464,15 @@ with tab_chat:
                 st.error(f"Error: {e}")
                 full_response = f"Error: {e}"
 
-        # Persist to history
+            # Show citations inline right after the response
+            render_citations(current_citations, key_prefix="live")
+
+        # Persist to history + save citations keyed by assistant message index
         st.session_state.messages.append({"role": "user", "content": user_input})
+        assistant_idx = len(st.session_state.messages)  # index of the msg we're about to append
         st.session_state.messages.append({"role": "assistant", "content": full_response})
+        if current_citations:
+            st.session_state.citations_by_msg[assistant_idx] = current_citations
 
     # Clear chat button
     if st.session_state.messages:

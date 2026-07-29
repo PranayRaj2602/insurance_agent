@@ -30,6 +30,7 @@ class ChatAgent:
         user_message: str,
         history: list[dict],
         claim_id: Optional[str] = None,
+        citations=None,
     ) -> Generator[str, None, None]:
         """Stream a response through the agentic tool loop."""
         messages = list(history)
@@ -77,6 +78,7 @@ class ChatAgent:
                     block.input,
                     self.store,
                     self.summaries_cache,
+                    citations,
                 )
                 tool_results.append({
                     "type": "tool_result",

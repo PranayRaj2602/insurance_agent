@@ -100,8 +100,11 @@ def execute_tool(
     inputs: dict,
     store,
     summaries_cache: dict,
+    citations=None,
 ) -> str:
-    """Execute a tool call and return a string result."""
+    """Execute a tool call and return a string result.
+    If citations list is provided, search_documents appends citation metadata to it.
+    """
     if name == "search_documents":
         results = store.search(
             query=inputs["query"],
@@ -116,6 +119,16 @@ def execute_tool(
             parts.append(
                 f"[{meta['claim_id']} / {meta['file_type']}] (score: {r['score']:.2f})\n{r['text']}"
             )
+            # Collect citation for UI display
+            if citations is not None:
+                citations.append({
+                    "claim_id": meta["claim_id"],
+                    "file_type": meta["file_type"],
+                    "score": r["score"],
+                    "text": r["text"],
+                    "path": meta.get("path", ""),
+                    "chunk_index": meta.get("chunk_index", 0),
+                })
         return "\n\n---\n\n".join(parts)
 
     elif name == "get_claim_documents":
@@ -134,10 +147,33 @@ def execute_tool(
         return f"No pre-computed summary for {claim_id}. Use the Summarize tab to generate one first."
 
     elif name == "analyze_coverage":
-        return _coverage_sub_agent(inputs["claim_id"], store)
+        cid = inputs["claim_id"]
+        if citations is not None:
+            for d in store.get_by_claim(cid):
+                citations.append({
+                    "claim_id": cid,
+                    "file_type": d["metadata"]["file_type"],
+                    "score": 1.0,
+                    "text": d["text"][:200],
+                    "path": d["metadata"].get("path", ""),
+                    "chunk_index": 0,
+                })
+        return _coverage_sub_agent(cid, store)
 
     elif name == "compare_claims":
-        return _compare_sub_agent(inputs["claim_id_1"], inputs["claim_id_2"], store)
+        cid1, cid2 = inputs["claim_id_1"], inputs["claim_id_2"]
+        if citations is not None:
+            for cid in (cid1, cid2):
+                for d in store.get_by_claim(cid)[:3]:
+                    citations.append({
+                        "claim_id": cid,
+                        "file_type": d["metadata"]["file_type"],
+                        "score": 1.0,
+                        "text": d["text"][:200],
+                        "path": d["metadata"].get("path", ""),
+                        "chunk_index": 0,
+                    })
+        return _compare_sub_agent(cid1, cid2, store)
 
     return f"Unknown tool: {name}"
 
