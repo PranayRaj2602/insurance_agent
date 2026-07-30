@@ -1,0 +1,10 @@
+{
+  "CLM-00000027": {
+    "insured_name": "Acme Corporation",
+    "policy_id": "POL-2025-099",
+    "date_of_loss": "2026-07-30",
+    "cause_of_loss": "Fire",
+    "created_at": "2026-07-30T17:31:29.639252",
+    "file_count": 1
+  }
+}

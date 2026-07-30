@@ -9,6 +9,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 CLAIMS_JSON = DATA_DIR / "claims_data.json"
+CLAIMS_METADATA_JSON = DATA_DIR / "claims_metadata.json"
 CHROMA_DIR = DATA_DIR / ".chroma"
 
 MODEL_ORCHESTRATOR = "claude-opus-4-8"

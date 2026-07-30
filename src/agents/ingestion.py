@@ -1,4 +1,5 @@
 import anthropic
+from pathlib import Path
 from src.config import ANTHROPIC_API_KEY
 from src.tools.pdf_extractor import extract_text, classify_and_extract
 from src.tools.document_store import DocumentStore
@@ -9,6 +10,31 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 class IngestionAgent:
     def __init__(self, store: DocumentStore):
         self.store = store
+
+    def ingest_with_meta(
+        self,
+        pdf_path: str,
+        claim_id: str,
+        file_type_hint: str,
+        metadata_override: dict = None,
+    ) -> dict:
+        """Ingest a PDF using caller-supplied metadata — skips LLM classification."""
+        text = extract_text(pdf_path)
+        if not text.strip():
+            raise ValueError(f"Could not extract text from {pdf_path}")
+        self.store.add_document(
+            claim_id=claim_id,
+            file_type=file_type_hint,
+            text=text,
+            path=Path(pdf_path).name,
+            summary="",
+        )
+        return {
+            "claim_id": claim_id,
+            "file_type": file_type_hint,
+            "text_length": len(text),
+            **(metadata_override or {}),
+        }
 
     def ingest(self, pdf_path: str) -> dict:
         """Extract, classify, and store a PDF document."""
